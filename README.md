@@ -82,11 +82,18 @@ O sistema possui **duas telas comutáveis**:
 ## 📁 Estrutura de Código
 
 ```
-galton_board.c         ← Código principal da simulação
-src/
- ├── ssd1306.h         ← Interface de controle do display
- ├── ssd1306_i2c.c     ← Driver via barramento I²C
- └── ssd1306_font.c    ← Fontes para o display
+├── include/
+│   ├── ssd1306.h
+│   ├── ssd1306_i2c.h
+│   ├── ssd1306_font.h
+│   └── ssd1306_i2c.c
+├── src/
+│   └── lab-01-galton-board.c
+├── CMakeLists.txt
+├── pico_sdk_import.cmake
+├── LICENSE
+├── .gitignore
+└── README.md
 ```
 
 ---
