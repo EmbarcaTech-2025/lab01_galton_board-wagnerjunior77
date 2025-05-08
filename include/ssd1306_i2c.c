@@ -1,245 +1,306 @@
-#include <stdio.h>
-#include <string.h>
-#include <stdlib.h>
-#include <ctype.h>
-#include "pico/stdlib.h"
-#include "pico/binary_info.h"
+/*
+
+MIT License
+
+Copyright (c) 2021 David Schramm
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+*/
+
+#include <pico/stdlib.h>
 #include "hardware/i2c.h"
+#include <pico/binary_info.h>
+#include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
+
+#include "ssd1306.h"
 #include "ssd1306_font.h"
-#include "ssd1306_i2c.h"
 
-// Calcular quanto do buffer será destinado à área de renderização
-void calculate_render_area_buffer_length(struct render_area *area) {
-    area->buffer_length = (area->end_column - area->start_column + 1) * (area->end_page - area->start_page + 1);
+inline static void swap(int32_t *a, int32_t *b) {
+    int32_t *t=a;
+    *a=*b;
+    *b=*t;
 }
 
-// Processo de escrita do i2c espera um byte de controle, seguido por dados
-void ssd1306_send_command(uint8_t command) {
-    uint8_t buffer[2] = {0x80, command};
-    i2c_write_blocking(i2c1, ssd1306_i2c_address, buffer, 2, false);
-}
-
-// Envia uma lista de comandos ao hardware
-void ssd1306_send_command_list(uint8_t *ssd, int number) {
-    for (int i = 0; i < number; i++) {
-        ssd1306_send_command(ssd[i]);
+inline static void fancy_write(i2c_inst_t *i2c, uint8_t addr, const uint8_t *src, size_t len, char *name) {
+    switch(i2c_write_blocking(i2c, addr, src, len, false)) {
+    case PICO_ERROR_GENERIC:
+        printf("[%s] addr not acknowledged!\n", name);
+        break;
+    case PICO_ERROR_TIMEOUT:
+        printf("[%s] timeout!\n", name);
+        break;
+    default:
+        //printf("[%s] wrote successfully %lu bytes!\n", name, len);
+        break;
     }
 }
 
-// Copia buffer de referência num novo buffer, a fim de adicionar o byte de controle desde o início
-void ssd1306_send_buffer(uint8_t ssd[], int buffer_length) {
-    uint8_t *temp_buffer = malloc(buffer_length + 1);
-
-    temp_buffer[0] = 0x40;
-    memcpy(temp_buffer + 1, ssd, buffer_length);
-
-    i2c_write_blocking(i2c1, ssd1306_i2c_address, temp_buffer, buffer_length + 1, false);
-
-    free(temp_buffer);
+inline static void ssd1306_write(ssd1306_t *p, uint8_t val) {
+    uint8_t d[2]= {0x00, val};
+    fancy_write(p->i2c_i, p->address, d, 2, "ssd1306_write");
 }
 
-// Cria a lista de comandos (com base nos endereços definidos em ssd1306_i2c.h) para a inicialização do display
-void ssd1306_init() {
-    uint8_t commands[] = {
-        ssd1306_set_display, ssd1306_set_memory_mode, 0x00,
-        ssd1306_set_display_start_line, ssd1306_set_segment_remap | 0x01, 
-        ssd1306_set_mux_ratio, ssd1306_height - 1,
-        ssd1306_set_common_output_direction | 0x08, ssd1306_set_display_offset,
-        0x00, ssd1306_set_common_pin_configuration,
-    
-#if ((ssd1306_width == 128) && (ssd1306_height == 32))
-    0x02,
-#elif ((ssd1306_width == 128) && (ssd1306_height == 64))
-    0x12,
-#else
-    0x02,
-#endif
-        ssd1306_set_display_clock_divide_ratio, 0x80, ssd1306_set_precharge,
-        0xF1, ssd1306_set_vcomh_deselect_level, 0x30, ssd1306_set_contrast,
-        0xFF, ssd1306_set_entire_on, ssd1306_set_normal_display,
-        ssd1306_set_charge_pump, 0x14, ssd1306_set_scroll | 0x00,
-        ssd1306_set_display | 0x01,
+bool ssd1306_init(ssd1306_t *p, uint16_t width, uint16_t height, uint8_t address, i2c_inst_t *i2c_instance) {
+    p->width=width;
+    p->height=height;
+    p->pages=height/8;
+    p->address=address;
+
+    p->i2c_i=i2c_instance;
+
+
+    p->bufsize=(p->pages)*(p->width);
+    if((p->buffer=malloc(p->bufsize+1))==NULL) {
+        p->bufsize=0;
+        return false;
+    }
+
+    ++(p->buffer);
+
+    // from https://github.com/makerportal/rpi-pico-ssd1306
+    uint8_t cmds[]= {
+        SET_DISP,
+        // timing and driving scheme
+        SET_DISP_CLK_DIV,
+        0x80,
+        SET_MUX_RATIO,
+        height - 1,
+        SET_DISP_OFFSET,
+        0x00,
+        // resolution and layout
+        SET_DISP_START_LINE,
+        // charge pump
+        SET_CHARGE_PUMP,
+        p->external_vcc?0x10:0x14,
+        SET_SEG_REMAP | 0x01,           // column addr 127 mapped to SEG0
+        SET_COM_OUT_DIR | 0x08,         // scan from COM[N] to COM0
+        SET_COM_PIN_CFG,
+        width>2*height?0x02:0x12,
+        // display
+        SET_CONTRAST,
+        0xff,
+        SET_PRECHARGE,
+        p->external_vcc?0x22:0xF1,
+        SET_VCOM_DESEL,
+        0x30,                           // or 0x40?
+        SET_ENTIRE_ON,                  // output follows RAM contents
+        SET_NORM_INV,                   // not inverted
+        SET_DISP | 0x01,
+        // address setting
+        SET_MEM_ADDR,
+        0x00,  // horizontal
     };
 
-    ssd1306_send_command_list(commands, count_of(commands));
+    for(size_t i=0; i<sizeof(cmds); ++i)
+        ssd1306_write(p, cmds[i]);
+
+    return true;
 }
 
-// Cria a lista de comandos para configurar o scrolling
-void ssd1306_scroll(bool set) {
-    uint8_t commands[] = {
-        ssd1306_set_horizontal_scroll | 0x00, 0x00, 0x00, 0x00, 0x03,
-        0x00, 0xFF, ssd1306_set_scroll | (set ? 0x01 : 0)
-    };
-
-    ssd1306_send_command_list(commands, count_of(commands));
+inline void ssd1306_deinit(ssd1306_t *p) {
+    free(p->buffer-1);
 }
 
-// Atualiza uma parte do display com uma área de renderização
-void render_on_display(uint8_t *ssd, struct render_area *area) {
-    uint8_t commands[] = {
-        ssd1306_set_column_address, area->start_column, area->end_column,
-        ssd1306_set_page_address, area->start_page, area->end_page
-    };
-
-    ssd1306_send_command_list(commands, count_of(commands));
-    ssd1306_send_buffer(ssd, area->buffer_length);
+inline void ssd1306_poweroff(ssd1306_t *p) {
+    ssd1306_write(p, SET_DISP|0x00);
 }
 
-// Determina o pixel a ser aceso (no display) de acordo com a coordenada fornecida
-void ssd1306_set_pixel(uint8_t *ssd, int x, int y, bool set) {
-    assert(x >= 0 && x < ssd1306_width && y >= 0 && y < ssd1306_height);
+inline void ssd1306_poweron(ssd1306_t *p) {
+    ssd1306_write(p, SET_DISP|0x01);
+}
 
-    const int bytes_per_row = ssd1306_width;
+inline void ssd1306_contrast(ssd1306_t *p, uint8_t val) {
+    ssd1306_write(p, SET_CONTRAST);
+    ssd1306_write(p, val);
+}
 
-    int byte_idx = (y / 8) * bytes_per_row + x;
-    uint8_t byte = ssd[byte_idx];
+inline void ssd1306_invert(ssd1306_t *p, uint8_t inv) {
+    ssd1306_write(p, SET_NORM_INV | (inv & 1));
+}
 
-    if (set) {
-        byte |= 1 << (y % 8);
+inline void ssd1306_clear(ssd1306_t *p) {
+    memset(p->buffer, 0, p->bufsize);
+}
+
+void ssd1306_clear_pixel(ssd1306_t *p, uint32_t x, uint32_t y) {
+    if(x>=p->width || y>=p->height) return;
+
+    p->buffer[x+p->width*(y>>3)]&=~(0x1<<(y&0x07));
+}
+
+void ssd1306_draw_pixel(ssd1306_t *p, uint32_t x, uint32_t y) {
+    if(x>=p->width || y>=p->height) return;
+
+    p->buffer[x+p->width*(y>>3)]|=0x1<<(y&0x07); // y>>3==y/8 && y&0x7==y%8
+}
+
+void ssd1306_draw_line(ssd1306_t *p, int32_t x1, int32_t y1, int32_t x2, int32_t y2) {
+    if(x1>x2) {
+        swap(&x1, &x2);
+        swap(&y1, &y2);
     }
-    else {
-        byte &= ~(1 << (y % 8));
-    }
 
-    ssd[byte_idx] = byte;
-}
-
-// Algoritmo de Bresenham básico
-void ssd1306_draw_line(uint8_t *ssd, int x_0, int y_0, int x_1, int y_1, bool set) {
-    int dx = abs(x_1 - x_0); // Deslocamentos
-    int dy = -abs(y_1 - y_0);
-    int sx = x_0 < x_1 ? 1 : -1; // Direção de avanço
-    int sy = y_0 < y_1 ? 1 : -1;
-    int error = dx + dy; // Erro acumulado
-    int error_2;
-
-    while (true) {
-        ssd1306_set_pixel(ssd, x_0, y_0, set); // Acende pixel no ponto atual
-        if (x_0 == x_1 && y_0 == y_1) {
-            break; // Verifica se o ponto final foi alcançado
-        }
-
-        error_2 = 2 * error; // Ajusta o erro acumulado
-
-        if (error_2 >= dy) {
-            error += dy;
-            x_0 += sx; // Avança na direção x
-        }
-        if (error_2 <= dx) {
-            error += dx;
-            y_0 += sy; // Avança na direção y
-        }
-    }
-}
-
-// Adquire os pixels para um caractere (de acordo com ssd1306_font.h)
-inline int ssd1306_get_font(uint8_t character)
-{
-  if (character >= 'A' && character <= 'Z') {
-    return character - 'A' + 1;
-  }
-  else if (character >= '0' && character <= '9') {
-    return character - '0' + 27;
-  }
-  else
-    return 0;
-}
-
-// Desenha um único caractere no display
-void ssd1306_draw_char(uint8_t *ssd, int16_t x, int16_t y, uint8_t character) {
-    if (x > ssd1306_width - 8 || y > ssd1306_height - 8) {
+    if(x1==x2) {
+        if(y1>y2)
+            swap(&y1, &y2);
+        for(int32_t i=y1; i<=y2; ++i)
+            ssd1306_draw_pixel(p, x1, i);
         return;
     }
 
-    y = y / 8;
+    float m=(float) (y2-y1) / (float) (x2-x1);
 
-    character = toupper(character);
-    int idx = ssd1306_get_font(character);
-    int fb_idx = y * 128 + x;
-
-    for (int i = 0; i < 8; i++) {
-        ssd[fb_idx++] = font[idx * 8 + i];
+    for(int32_t i=x1; i<=x2; ++i) {
+        float y=m*(float) (i-x1)+(float) y1;
+        ssd1306_draw_pixel(p, i, (uint32_t) y);
     }
 }
 
-// Desenha uma string, chamando a função de desenhar caractere várias vezes
-void ssd1306_draw_string(uint8_t *ssd, int16_t x, int16_t y, char *string) {
-    if (x > ssd1306_width - 8 || y > ssd1306_height - 8) {
+void ssd1306_clear_square(ssd1306_t *p, uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
+    for(uint32_t i=0; i<width; ++i)
+        for(uint32_t j=0; j<height; ++j)
+            ssd1306_clear_pixel(p, x+i, y+j);
+}
+
+void ssd1306_draw_square(ssd1306_t *p, uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
+    for(uint32_t i=0; i<width; ++i)
+        for(uint32_t j=0; j<height; ++j)
+            ssd1306_draw_pixel(p, x+i, y+j);
+}
+
+void ssd1306_draw_empty_square(ssd1306_t *p, uint32_t x, uint32_t y, uint32_t width, uint32_t height) {
+    ssd1306_draw_line(p, x, y, x+width, y);
+    ssd1306_draw_line(p, x, y+height, x+width, y+height);
+    ssd1306_draw_line(p, x, y, x, y+height);
+    ssd1306_draw_line(p, x+width, y, x+width, y+height);
+}
+
+void ssd1306_draw_char_with_font(ssd1306_t *p, uint32_t x, uint32_t y, uint32_t scale, const uint8_t *font, char c) {
+    if(c<font[3]||c>font[4])
         return;
+
+    uint32_t parts_per_line=(font[0]>>3)+((font[0]&7)>0);
+    for(uint8_t w=0; w<font[1]; ++w) { // width
+        uint32_t pp=(c-font[3])*font[1]*parts_per_line+w*parts_per_line+5;
+        for(uint32_t lp=0; lp<parts_per_line; ++lp) {
+            uint8_t line=font[pp];
+
+            for(int8_t j=0; j<8; ++j, line>>=1) {
+                if(line & 1)
+                    ssd1306_draw_square(p, x+w*scale, y+((lp<<3)+j)*scale, scale, scale);
+            }
+
+            ++pp;
+        }
+    }
+}
+
+void ssd1306_draw_string_with_font(ssd1306_t *p, uint32_t x, uint32_t y, uint32_t scale, const uint8_t *font, const char *s) {
+    for(int32_t x_n=x; *s; x_n+=(font[1]+font[2])*scale) {
+        ssd1306_draw_char_with_font(p, x_n, y, scale, font, *(s++));
+    }
+}
+
+void ssd1306_draw_char(ssd1306_t *p, uint32_t x, uint32_t y, uint32_t scale, char c) {
+    ssd1306_draw_char_with_font(p, x, y, scale, font_8x5, c);
+}
+
+void ssd1306_draw_string(ssd1306_t *p, uint32_t x, uint32_t y, uint32_t scale, const char *s) {
+    ssd1306_draw_string_with_font(p, x, y, scale, font_8x5, s);
+}
+
+static inline uint32_t ssd1306_bmp_get_val(const uint8_t *data, const size_t offset, uint8_t size) {
+    switch(size) {
+    case 1:
+        return data[offset];
+    case 2:
+        return data[offset]|(data[offset+1]<<8);
+    case 4:
+        return data[offset]|(data[offset+1]<<8)|(data[offset+2]<<16)|(data[offset+3]<<24);
+    default:
+        __builtin_unreachable();
+    }
+    __builtin_unreachable();
+}
+
+void ssd1306_bmp_show_image_with_offset(ssd1306_t *p, const uint8_t *data, const long size, uint32_t x_offset, uint32_t y_offset) {
+    if(size<54) // data smaller than header
+        return;
+
+    const uint32_t bfOffBits=ssd1306_bmp_get_val(data, 10, 4);
+    const uint32_t biSize=ssd1306_bmp_get_val(data, 14, 4);
+    const uint32_t biWidth=ssd1306_bmp_get_val(data, 18, 4);
+    const int32_t biHeight=(int32_t) ssd1306_bmp_get_val(data, 22, 4);
+    const uint16_t biBitCount=(uint16_t) ssd1306_bmp_get_val(data, 28, 2);
+    const uint32_t biCompression=ssd1306_bmp_get_val(data, 30, 4);
+
+    if(biBitCount!=1) // image not monochrome
+        return;
+
+    if(biCompression!=0) // image compressed
+        return;
+
+    const int table_start=14+biSize;
+    uint8_t color_val=0;
+
+    for(uint8_t i=0; i<2; ++i) {
+        if(!((data[table_start+i*4]<<16)|(data[table_start+i*4+1]<<8)|data[table_start+i*4+2])) {
+            color_val=i;
+            break;
+        }
     }
 
-    while (*string) {
-        ssd1306_draw_char(ssd, x, y, *string++);
-        x += 8;
+    uint32_t bytes_per_line=(biWidth/8)+(biWidth&7?1:0);
+    if(bytes_per_line&3)
+        bytes_per_line=(bytes_per_line^(bytes_per_line&3))+4;
+
+    const uint8_t *img_data=data+bfOffBits;
+
+    int32_t step=biHeight>0?-1:1;
+    int32_t border=biHeight>0?-1:-biHeight;
+
+    for(uint32_t y=biHeight>0?biHeight-1:0; y!=(uint32_t)border; y+=step) {
+        for(uint32_t x=0; x<biWidth; ++x) {
+            if(((img_data[x>>3]>>(7-(x&7)))&1)==color_val)
+                ssd1306_draw_pixel(p, x_offset+x, y_offset+y);
+        }
+        img_data+=bytes_per_line;
     }
 }
 
-// Comando de configuração com base na estrutura ssd1306_t
-void ssd1306_command(ssd1306_t *ssd, uint8_t command) {
-  ssd->port_buffer[1] = command;
-  i2c_write_blocking(
-	ssd->i2c_port, ssd->address, ssd->port_buffer, 2, false );
+inline void ssd1306_bmp_show_image(ssd1306_t *p, const uint8_t *data, const long size) {
+    ssd1306_bmp_show_image_with_offset(p, data, size, 0, 0);
 }
 
-// Função de configuração do display para o caso do bitmap
-void ssd1306_config(ssd1306_t *ssd) {
-    ssd1306_command(ssd, ssd1306_set_display | 0x00);
-    ssd1306_command(ssd, ssd1306_set_memory_mode);
-    ssd1306_command(ssd, 0x01);
-    ssd1306_command(ssd, ssd1306_set_display_start_line | 0x00);
-    ssd1306_command(ssd, ssd1306_set_segment_remap | 0x01);
-    ssd1306_command(ssd, ssd1306_set_mux_ratio);
-    ssd1306_command(ssd, ssd1306_height - 1);
-    ssd1306_command(ssd, ssd1306_set_common_output_direction | 0x08);
-    ssd1306_command(ssd, ssd1306_set_display_offset);
-    ssd1306_command(ssd, 0x00);
-    ssd1306_command(ssd, ssd1306_set_common_pin_configuration);
-    ssd1306_command(ssd, 0x12);
-    ssd1306_command(ssd, ssd1306_set_display_clock_divide_ratio);
-    ssd1306_command(ssd, 0x80);
-    ssd1306_command(ssd, ssd1306_set_precharge);
-    ssd1306_command(ssd, 0xF1);
-    ssd1306_command(ssd, ssd1306_set_vcomh_deselect_level);
-    ssd1306_command(ssd, 0x30);
-    ssd1306_command(ssd, ssd1306_set_contrast);
-    ssd1306_command(ssd, 0xFF);
-    ssd1306_command(ssd, ssd1306_set_entire_on);
-    ssd1306_command(ssd, ssd1306_set_normal_display);
-    ssd1306_command(ssd, ssd1306_set_charge_pump);
-    ssd1306_command(ssd, 0x14);
-    ssd1306_command(ssd, ssd1306_set_display | 0x01);
-}
-
-// Inicializa o display para o caso de exibição de bitmap
-void ssd1306_init_bm(ssd1306_t *ssd, uint8_t width, uint8_t height, bool external_vcc, uint8_t address, i2c_inst_t *i2c) {
-    ssd->width = width;
-    ssd->height = height;
-    ssd->pages = height / 8U;
-    ssd->address = address;
-    ssd->i2c_port = i2c;
-    ssd->bufsize = ssd->pages * ssd->width + 1;
-    ssd->ram_buffer = calloc(ssd->bufsize, sizeof(uint8_t));
-    ssd->ram_buffer[0] = 0x40;
-    ssd->port_buffer[0] = 0x80;
-}
-
-// Envia os dados ao display
-void ssd1306_send_data(ssd1306_t *ssd) {
-    ssd1306_command(ssd, ssd1306_set_column_address);
-    ssd1306_command(ssd, 0);
-    ssd1306_command(ssd, ssd->width - 1);
-    ssd1306_command(ssd, ssd1306_set_page_address);
-    ssd1306_command(ssd, 0);
-    ssd1306_command(ssd, ssd->pages - 1);
-    i2c_write_blocking(
-    ssd->i2c_port, ssd->address, ssd->ram_buffer, ssd->bufsize, false );
-}
-
-// Desenha o bitmap (a ser fornecido em display_oled.c) no display
-void ssd1306_draw_bitmap(ssd1306_t *ssd, const uint8_t *bitmap) {
-    for (int i = 0; i < ssd->bufsize - 1; i++) {
-        ssd->ram_buffer[i + 1] = bitmap[i];
-
-        ssd1306_send_data(ssd);
+void ssd1306_show(ssd1306_t *p) {
+    uint8_t payload[]= {SET_COL_ADDR, 0, p->width-1, SET_PAGE_ADDR, 0, p->pages-1};
+    if(p->width==64) {
+        payload[1]+=32;
+        payload[2]+=32;
     }
+
+    for(size_t i=0; i<sizeof(payload); ++i)
+        ssd1306_write(p, payload[i]);
+
+    *(p->buffer-1)=0x40;
+
+    fancy_write(p->i2c_i, p->address, p->buffer-1, p->bufsize+1, "ssd1306_show");
 }
