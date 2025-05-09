@@ -13,16 +13,18 @@ Este projeto implementa uma **Galton Board virtual** utilizando um microcontrola
 
 A simulação representa a queda de bolas em um tabuleiro triangular de pinos, desviando aleatoriamente para a esquerda ou direita. As bolas acumulam-se nas canaletas inferiores, formando uma **distribuição normal**.
 
-O sistema possui **duas telas comutáveis**:
+O sistema possui **três telas comutáveis**:
 - **Tela 1:** simulação ao vivo com as bolas descendo e contador total.
 - **Tela 2:** histograma vertical com o número acumulado de bolas em cada bin (canaleta).
+- **Tela 3:** visualização em texto com os valores numéricos de cada bin.
 
 ---
 
 ## 🧱 Funcionalidades
 
 - 🌐 **Animação em tempo real** da queda de até 8 bolas simultâneas.
-- 📊 **Histograma dinâmico** com 16 barras verticais.
+- 📊 **Histograma dinâmico** com 10 barras verticais.
+- 🔢 **Exibição numérica por bin** com contagem total.
 - 🧩 **Triângulo de pinos virtual** desenhado com base na altura e deslocamento da simulação.
 - 🔁 **Alternância de tela** por botão físico (botão B).
 - 🔄 **Reinício instantâneo** da simulação com botão físico (botão A).
@@ -32,16 +34,17 @@ O sistema possui **duas telas comutáveis**:
 
 ## ⚙️ Especificações Técnicas
 
-| Item               | Valor                                  |
-|--------------------|----------------------------------------|
-| Display            | SSD1306 OLED 128x64 I²C                |
-| Microcontrolador   | RP2040 (via BitDogLab)                 |
-| Pinos I²C          | SDA = GP14, SCL = GP15                 |
-| Botão A (Restart)  | GPIO 5                                 |
-| Botão B (Troca de tela) | GPIO 6                            |
-| N° de Bins         | 16 canaletas                           |
-| Altura do histograma | 64 px (dinâmico)                    |
-| Biblioteca Display | [`ssd1306.h`](src/ssd1306.h)           |
+| Item                    | Valor                                 |
+|-------------------------|---------------------------------------|
+| Display                 | SSD1306 OLED 128x64 I²C               |
+| Microcontrolador        | RP2040 (via BitDogLab)                |
+| Pinos I²C               | SDA = GP14, SCL = GP15                |
+| Botão A (Restart)       | GPIO 5                                |
+| Botão B (Troca de tela) | GPIO 6                                |
+| N° de Bins              | 10 canaletas                          |
+| Largura por bin         | 12 px                                 |
+| Altura do histograma    | 64 px (dinâmico)                      |
+| Biblioteca Display      | [`ssd1306.h`](include/ssd1306.h)          |
 
 ---
 
@@ -63,6 +66,14 @@ O sistema possui **duas telas comutáveis**:
 • Contador total também visível
 ```
 
+**Tela 3 – Tabela numérica de bins:**
+
+```
+• Mostra os valores absolutos de cada canaleta
+• Formato: |  24|  40|  51| ...
+• Contador de bolas no rodapé
+```
+
 ---
 
 ## 🚀 Como usar
@@ -75,25 +86,21 @@ O sistema possui **duas telas comutáveis**:
    - Botões aos pinos GP5 (BTN A) e GP6 (BTN B)
 5. Pressione:
    - **BTN A** para reiniciar a simulação
-   - **BTN B** para alternar entre animação e histograma
+   - **BTN B** para alternar entre as 3 telas
 
 ---
 
 ## 📁 Estrutura de Código
 
 ```
-├── include/
-│   ├── ssd1306.h
-│   ├── ssd1306_i2c.h
-│   ├── ssd1306_font.h
-│   └── ssd1306_i2c.c
-├── src/
-│   └── lab-01-galton-board.c
-├── CMakeLists.txt
-├── pico_sdk_import.cmake
-├── LICENSE
-├── .gitignore
-└── README.md
+galton_board.c         ← Código principal da simulação
+include/
+ ├── ssd1306.h         ← Interface de controle do display
+ ├── ssd1306_i2c.h     ← Comunicação via I²C
+ └── ssd1306_font.h    ← Fontes para o display
+src/
+ ├── ssd1306_i2c.c     ← Driver via I²C
+ └── ssd1306_font.c    ← Implementação das fontes
 ```
 
 ---
